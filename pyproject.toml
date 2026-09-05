@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "modified-vnet-2pm"
+version = "0.1.0"
+description = "Standalone GPL Tian/Damseh Modified V-Net comparator"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "GPL-3.0-only"}
+dependencies = [
+  "monai>=1.3",
+  "nibabel>=5",
+  "numpy>=1.24",
+  "scikit-image>=0.21",
+  "torch>=2.1"
+]
+
+[project.scripts]
+modified-vnet-2pm = "modified_vnet_2pm.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["modified_vnet_2pm*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
