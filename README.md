@@ -28,7 +28,7 @@ PyTorch comparator。它与宿主医学分割项目通过命令行、JSON 和预
 - 以 Dice3D 与 clDice3D 的调和均值选择 checkpoint；
 - 省略宿主旧管线中不参与权重更新或选模的随机 validation-patch loss 日志；
 - 固定阈值 `0.5`；
-- 禁止访问 outer-test。
+- 训练命令禁止访问 outer-test；纯推理命令必须另行验证宿主授权清单和全局 RUN ID。
 
 ## 运行
 
@@ -53,8 +53,14 @@ python -m modified_vnet_2pm.cli \
 - `checkpoints/latest_model.pt`
 - `predictions/<case>.npy`
 
-最终论文统一指标由宿主项目从 `.npy` 预测文件独立计算。本仓库不读取 outer-test，
-也不产生模型优越性结论。
+在宿主项目已登记 outer-test 授权、固定全局 RUN ID 且 checkpoint SHA-256
+匹配后，纯推理入口可以只读取 fold_N/test/images：
+
+```bash python -m modified_vnet_2pm.predict_cli \   --protocol configs/frozen_protocol.json \   --images-root /path/to/fold_1/test/images \   --checkpoint /path/to/frozen_checkpoint.pt \   --expected-checkpoint-sha256 CHECKPOINT_SHA256 \   --authorization-manifest /path/to/domain_outertest_manifest.json \   --assignment-manifest /path/to/split_manifest.json \   --expected-assignment-sha256 ASSIGNMENT_SHA256 \   --fold 1 \   --run-id RUN-XXXX \   --output-root /path/to/results/fold_1/gpl_process_output \   --expected-commit $(git rev-parse HEAD) ```
+
+该入口不接收 mask 路径，不训练、不选模、不调阈值，只输出
+prediction_manifest.json 与 predictions/<case>.npy。最终论文统一指标由宿主项目
+独立计算；本仓库不产生模型优越性结论。
 
 进程边界是本项目的分发约束：宿主不得将 `modified_vnet_2pm` 作为 Python 依赖导入，
 也不得把本仓库源码复制回宿主代码树。若未来改成同进程插件或复制实现，需要重新进行

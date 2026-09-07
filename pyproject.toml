@@ -19,6 +19,7 @@ dependencies = [
 
 [project.scripts]
 modified-vnet-2pm = "modified_vnet_2pm.cli:main"
+modified-vnet-2pm-predict = "modified_vnet_2pm.predict_cli:main"
 
 [tool.setuptools.packages.find]
 include = ["modified_vnet_2pm*"]
