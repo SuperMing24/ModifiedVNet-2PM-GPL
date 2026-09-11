@@ -20,6 +20,9 @@ def main() -> int:
     parser.add_argument("--fold", type=int, choices=range(5), required=True)
     parser.add_argument("--output-root", type=Path, required=True)
     parser.add_argument("--expected-commit", required=True)
+    parser.add_argument("--sampling-manifest", type=Path)
+    parser.add_argument("--expected-sampling-manifest-sha256")
+    parser.add_argument("--subset-key")
     args = parser.parse_args()
     install_signal_handlers()
     repository_root = Path(__file__).resolve().parents[1]
@@ -34,6 +37,9 @@ def main() -> int:
             fold=args.fold,
             output_root=args.output_root,
             expected_commit=args.expected_commit,
+            sampling_manifest=args.sampling_manifest,
+            expected_sampling_manifest_sha256=args.expected_sampling_manifest_sha256,
+            subset_key=args.subset_key,
         )
     except BaseException as error:
         print(json.dumps({"status": "failed", "error": str(error)}, sort_keys=True))

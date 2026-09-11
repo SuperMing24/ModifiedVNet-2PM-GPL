@@ -36,6 +36,7 @@ def load_protocol(path: str | Path) -> dict[str, Any]:
         "beta1": 0.9,
         "beta2": 0.999,
         "loss_alpha": 5e-9,
+        "balance_epsilon": 0.001,
         "inference_overlap": 0.0,
         "inference_sw_batch_size": 4,
         "threshold": 0.5,

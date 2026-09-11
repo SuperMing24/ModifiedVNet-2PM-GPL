@@ -24,6 +24,8 @@ from .data import TianDamsehGridPatchDataset3D, load_split
 from .loss import TianDamsehTVBCELoss
 from .model import TianDamsehVNet
 from .protocol import load_protocol, sha256, validate_split_inputs
+from .recovery import atomic_replace, atomic_torch, output_lock, project_epoch_views, validate_snapshot
+from .sampling import execution_identity, load_sampling_contract
 
 
 class TerminationRequested(RuntimeError):
@@ -41,14 +43,14 @@ def _atomic_json(path: Path, payload: dict[str, Any]) -> None:
         json.dumps(payload, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
-    temporary.replace(path)
+    atomic_replace(temporary, path)
 
 
 def _atomic_torch(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + ".tmp")
     torch.save(payload, temporary)
-    temporary.replace(path)
+    atomic_replace(temporary, path)
 
 
 def _atomic_numpy(path: Path, value: np.ndarray) -> None:
@@ -56,7 +58,7 @@ def _atomic_numpy(path: Path, value: np.ndarray) -> None:
     temporary = path.with_suffix(path.suffix + ".tmp")
     with temporary.open("wb") as handle:
         np.save(handle, value)
-    temporary.replace(path)
+    atomic_replace(temporary, path)
 
 
 def _git(root: Path, *args: str) -> str:
@@ -107,11 +109,22 @@ def _rng_state() -> dict[str, Any]:
 
 
 def _restore_rng_state(state: dict[str, Any]) -> None:
+    cuda_states = state.get("cuda", [])
+    if torch.cuda.is_available() and not cuda_states:
+        raise ValueError("resume CUDA RNG state is missing")
+    if cuda_states and (not torch.cuda.is_available() or len(cuda_states) != torch.cuda.device_count()):
+        raise ValueError("resume CUDA RNG device-count mismatch")
     random.setstate(state["python"])
     np.random.set_state(state["numpy"])
-    torch.set_rng_state(state["torch"])
-    if torch.cuda.is_available() and "cuda" in state:
-        torch.cuda.set_rng_state_all(state["cuda"])
+    torch.set_rng_state(state["torch"].cpu())
+    if cuda_states:
+        torch.cuda.set_rng_state_all([value.cpu() for value in cuda_states])
+
+
+def _training_device() -> torch.device:
+    if not torch.cuda.is_available():
+        raise RuntimeError("CUDA is required for the complete protocol")
+    return torch.device("cuda")
 
 
 def infer_volume(
@@ -185,7 +198,7 @@ def _checkpoint_payload(
         "epoch": epoch,
         "best_metric": best_metric,
         "model_state_dict": {
-            key: value.detach().cpu() for key, value in model.state_dict().items()
+            key: value.detach().cpu().clone() for key, value in model.state_dict().items()
         },
         "optimizer_state_dict": optimizer.state_dict(),
         "rng_state": _rng_state(),
@@ -193,7 +206,16 @@ def _checkpoint_payload(
     }
 
 
-def run(
+def run(**kwargs: Any) -> dict[str, Any]:
+    root = Path(kwargs["repository_root"]).resolve()
+    output = Path(kwargs["output_root"]).resolve()
+    if output == root or root in output.parents:
+        raise ValueError("result output must remain outside the GPL checkout")
+    with output_lock(output):
+        return _run(**kwargs)
+
+
+def _run(
     *,
     repository_root: Path,
     protocol_path: Path,
@@ -204,6 +226,9 @@ def run(
     fold: int,
     output_root: Path,
     expected_commit: str,
+    sampling_manifest: Path | None = None,
+    expected_sampling_manifest_sha256: str | None = None,
+    subset_key: str | None = None,
 ) -> dict[str, Any]:
     protocol = load_protocol(protocol_path)
     validate_split_inputs(
@@ -213,6 +238,21 @@ def run(
         expected_assignment_sha256,
         fold,
     )
+    sampling = None
+    sampling_args = (sampling_manifest, expected_sampling_manifest_sha256, subset_key)
+    if any(value is not None for value in sampling_args):
+        if not all(value is not None for value in sampling_args):
+            raise ValueError("all three sampling CLI arguments must be supplied together")
+        sampling = load_sampling_contract(
+            manifest_path=sampling_manifest,
+            expected_manifest_sha256=expected_sampling_manifest_sha256,
+            subset_key=subset_key,
+            assignment_manifest=assignment_manifest,
+            expected_assignment_sha256=expected_assignment_sha256,
+            fold=fold,
+            train_root=train_root,
+            validation_root=validation_root,
+        )
     repository_root = repository_root.resolve()
     if _git(repository_root, "status", "--porcelain"):
         raise RuntimeError("standalone GPL checkout must be clean")
@@ -226,9 +266,21 @@ def run(
         raise ValueError("result output must remain outside the GPL checkout")
 
     result_path = output_root / "training_result.json"
+    identity = execution_identity(sampling, sha256(protocol_path), observed_commit) if sampling else None
+    existing: dict[str, Any] = {}
     if result_path.is_file():
         existing = json.loads(result_path.read_text(encoding="utf-8"))
+        if sampling and existing.get("execution_identity") != identity:
+            raise ValueError("existing output sampling identity mismatch")
+        if sampling and existing.get("last_completed_epoch", 0) > 0 and not (output_root / "checkpoints/latest_model.pt").is_file():
+            raise ValueError("committed progress exists but latest checkpoint is missing")
         if existing.get("status") == "completed":
+            if sampling:
+                if sha256(Path(existing["checkpoint"])) != existing["checkpoint_sha256"]:
+                    raise ValueError("completed checkpoint digest mismatch")
+                for prediction in existing["prediction_manifest"]:
+                    if sha256(Path(prediction["path"])) != prediction["sha256"]:
+                        raise ValueError("completed prediction digest mismatch")
             return existing
 
     result: dict[str, Any] = {
@@ -250,13 +302,21 @@ def run(
         "outer_test_accessed": False,
         "performance_superiority_claim_allowed": False,
     }
+    if sampling:
+        result["execution_identity"] = identity
+        result["effective_training_seed"] = sampling["training_seed"]
+        result["initial_started_at_utc"] = existing.get("initial_started_at_utc", result["started_at_utc"])
+        result["previous_attempts"] = existing.get("previous_attempts", [])
+        if existing:
+            result["previous_attempts"].append({
+                key: existing.get(key) for key in
+                ("started_at_utc", "completed_at_utc", "slurm_job_id", "status", "last_completed_epoch")
+            })
     _atomic_json(result_path, result)
 
     try:
-        if not torch.cuda.is_available():
-            raise RuntimeError("CUDA is required for the complete protocol")
-        device = torch.device("cuda")
-        _seed_everything(int(protocol["seed"]))
+        device = _training_device()
+        _seed_everything(sampling["training_seed"] if sampling else int(protocol["seed"]))
         model = TianDamsehVNet(
             in_channels=1,
             out_channels=1,
@@ -270,7 +330,8 @@ def run(
 
         training_volumes = load_split(train_root)
         validation_volumes = load_split(validation_root)
-        if len(training_volumes) != 42 or len(validation_volumes) != 14:
+        expected_train_count = len(sampling["membership"]["train_ids"]) if sampling else 42
+        if len(training_volumes) != expected_train_count or len(validation_volumes) != 14:
             raise ValueError(
                 "frozen split cardinality mismatch: "
                 f"train={len(training_volumes)} val={len(validation_volumes)}"
@@ -286,7 +347,7 @@ def run(
             shuffle=True,
             num_workers=0,
         )
-        if len(training_dataset) != 2058:
+        if not sampling and len(training_dataset) != 2058:
             raise ValueError(
                 f"official grid cardinality drift: {len(training_dataset)} != 2058"
             )
@@ -298,16 +359,25 @@ def run(
         start_epoch = 1
         best_metric: float | None = None
         resumed_from: str | None = None
+        history: list[dict[str, Any]] = []
+        best_state: dict[str, Any] | None = None
         if latest_path.is_file():
-            state = torch.load(latest_path, map_location=device, weights_only=False)
+            state = torch.load(latest_path, map_location="cpu", weights_only=False)
             if state.get("protocol_sha256") != result["protocol_sha256"]:
                 raise ValueError("resume checkpoint protocol drift")
+            if sampling:
+                validate_snapshot(state, identity, len(training_dataset))
+                history = state["history"]
+                best_state = state["best_checkpoint"]
+                project_epoch_views(output_root, state)
             model.load_state_dict(state["model_state_dict"], strict=True)
             optimizer.load_state_dict(state["optimizer_state_dict"])
             _restore_rng_state(state["rng_state"])
             start_epoch = int(state["epoch"]) + 1
             best_metric = state.get("best_metric")
             resumed_from = str(latest_path)
+        elif sampling and (best_path.exists() or history_path.exists()):
+            raise ValueError("latest checkpoint missing; refusing best fallback or silent restart")
 
         result.update(
             {
@@ -323,6 +393,7 @@ def run(
                 "batches_per_epoch": len(training_loader),
                 "start_epoch": start_epoch,
                 "resumed_from": resumed_from,
+                "last_completed_epoch": start_epoch - 1,
             }
         )
         _atomic_json(result_path, result)
@@ -356,26 +427,6 @@ def run(
             )
             if is_new_best:
                 best_metric = float(selection["checkpoint_score"])
-                _atomic_torch(
-                    best_path,
-                    _checkpoint_payload(
-                        model,
-                        optimizer,
-                        epoch,
-                        best_metric,
-                        result["protocol_sha256"],
-                    ),
-                )
-            _atomic_torch(
-                latest_path,
-                _checkpoint_payload(
-                    model,
-                    optimizer,
-                    epoch,
-                    best_metric,
-                    result["protocol_sha256"],
-                ),
-            )
             epoch_row = {
                 "epoch": epoch,
                 "train_loss": float(np.mean(losses)),
@@ -385,8 +436,28 @@ def run(
                 "epoch_seconds": time.perf_counter() - epoch_started,
                 "validation": rows,
             }
-            with history_path.open("a", encoding="utf-8") as handle:
-                handle.write(json.dumps(epoch_row, sort_keys=True) + "\n")
+            payload = _checkpoint_payload(model, optimizer, epoch, best_metric, result["protocol_sha256"])
+            if sampling:
+                payload.update({
+                    "schema_version": 2,
+                    "execution_identity": identity,
+                    "training_patch_count": len(training_dataset),
+                })
+                if is_new_best:
+                    best_state = {key: payload[key] for key in (
+                        "schema_version", "model_state_dict", "epoch", "best_metric",
+                        "protocol_sha256", "execution_identity", "training_patch_count",
+                    )}
+                history.append(epoch_row)
+                payload.update({"history": history, "best_checkpoint": best_state})
+                atomic_torch(latest_path, payload)
+                project_epoch_views(output_root, payload)
+            else:
+                if is_new_best:
+                    _atomic_torch(best_path, payload)
+                _atomic_torch(latest_path, payload)
+                with history_path.open("a", encoding="utf-8") as handle:
+                    handle.write(json.dumps(epoch_row, sort_keys=True) + "\n")
             result.update(
                 {
                     "last_completed_epoch": epoch,
