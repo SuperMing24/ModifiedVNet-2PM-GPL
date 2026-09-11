@@ -7,7 +7,29 @@
   "request_key": "24975262-9496-4b3a-a74a-935758419c24",
   "owner_thread_id": "019f4641-ae1f-7550-b1ba-e113bb045b20",
   "recipient_thread_id": "019f36c3-18c4-73e2-bf87-0531959d68cf",
-  "status": "cpu_qualified_ready_for_host_integration_and_cluster_qualification",
+  "status": "cpu_qualified_implementation_published_ready_for_host_integration",
+  "publication": {
+    "local_commit": "f22ac509d8cdc29733243d48f7a33d6a06eec6b2",
+    "ordinary_push": "implementation_commit_published_tool_confirmed",
+    "published_implementation_commit": "f22ac509d8cdc29733243d48f7a33d6a06eec6b2",
+    "remote_branch": "refs/heads/auto/random-sampling",
+    "direct_user_authorization": {
+      "confirmed_on": "2026-09-11",
+      "source_thread_id": "019f4641-ae1f-7550-b1ba-e113bb045b20",
+      "scope": "Commit publication status receipt and ordinary push of audited changes to this repository auto/random-sampling branch",
+      "timestamp_source": "execution-time Asia/Shanghai",
+      "main_writes": false,
+      "force_push": false
+    },
+    "force_push_attempted": false,
+    "first_review": "Reviewer did not recognize separate sampling-branch publishing authority.",
+    "additional_verification": "Read only exact source task turns 01a08f96-f1ba-73b0-87b3-e254159fa390 and 01a08f9b-2779-71e0-9591-5dda113b920d after native read returned empty items; direct source user approval observed at 2026-09-11T08:35:05.274Z, with prior proposal explicitly covering GPL sampling branch commit/push.",
+    "second_review": "Reviewer still requires direct approval in this receiving task; cross-task logs/manifest not accepted as authorization for push.",
+    "required_user_action": null,
+    "previous_publication_block_resolved": true,
+    "indirect_bypass": false,
+    "receipt_storage": "This tracked receipt records the observed successful implementation push; the containing receipt commit is published separately and verified against the remote branch in the final handoff."
+  },
   "authorization": {
     "source": "random_sampling_stage_authorization_20260911.json in random-sampling host worktree; bounded delegation 24975262-9496-4b3a-a74a-935758419c24",
     "local_adaptation_and_cpu_tests": true,
